@@ -164,13 +164,13 @@ uint8_t MM_GetPPN(int pid, uint8_t vpn, int writeable) {
 
 	// Throw an error if the entry is invalid
 	if(pte->valid == 0) {
-		DEBUG("invalid PTE entry");
+		DEBUG("invalid PTE entry\n");
 		return 0;
 	}
 
 	// Throw an error if the entry is readonly
-	if(pte->writable != writeable) {
-		DEBUG("attempt to write to readonly");
+	if(pte->writable == 0 && writeable) {
+		DEBUG("attempt to write to readonly\n");
 		return 0;
 	}
 
@@ -190,7 +190,7 @@ int MM_LoadByte(int pid, uint32_t address, uint8_t *value) {
 	// Simple way to convert VPN to physical page number
 	// Find PTE in process' page table, then extract physical page number
 
-	uint8_t ppn = MM_GetPPN(pid, vpn, 1);	
+	uint8_t ppn = MM_GetPPN(pid, vpn, 0);
 	if(!ppn)
 		return -1;
 
