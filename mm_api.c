@@ -71,10 +71,9 @@ int swap_enabled = 0;
 // to eject.
 struct phys_page_entry {
 	// Information about what is in this physical page.
-	uint8_t valid : 1;
-
-	// TODO: Check if I'm necessary
-	int pid;
+	int pid; // The ID of process using this page
+	uint8_t valid : 1; // Is the page entry in use
+	uint8_t is_page_table : 1; // 0 = data table, 1 = page table
 };
 struct phys_page_entry phys_pages[MM_PHYSICAL_PAGES];
 
@@ -86,13 +85,24 @@ void *phys_mem_addr_for_phys_page_entry(struct phys_page_entry *phys_page) {
 
 void MM_SwapOn() {
 	if (!swap_enabled) {
-		// Initialize swap files.
+		// Create swap files for each process
+		for(int i = 0; i < MM_MAX_PROCESSES; i++) {
+			char path[9] = {0};
+			sprintf(path, "./%d.swp", i);
+			FILE *swp = fopen(path, "w+");
+
+			processes[i].swap_file = swp;
+		}
+
+		// Initialize all physical page entry PIDs to 1
+		for(int i = 0; i < MM_PHYSICAL_PAGES; i++)
+			phys_pages[i].pid = -1;
 	}
 
 	swap_enabled = 1;
 }
 
-int MM_CheckMemInfo(int pid, uint32_t address, char message[128]) {
+int check_mem_info(int pid, uint32_t address, char message[128]) {
 	// PID out of range
 	if(pid >= MM_MAX_PROCESSES || pid < 0) {
 		sprintf(message, "pid out of range");
@@ -108,6 +118,11 @@ int MM_CheckMemInfo(int pid, uint32_t address, char message[128]) {
 	return 0;
 }
 
+// Returns the PPN that the page was swapped into
+int swap_page(int pid, uint8_t vpn) {
+	return -1;
+}
+
 struct MM_MapResult MM_Map(int pid, uint32_t address, int writable) {	
 	CHECK(sizeof(struct page_table_entry) <= MM_MAX_PTE_SIZE_BYTES);
 	uint8_t vpn = (uint8_t)(address >> MM_PAGE_SIZE_BITS);
@@ -120,21 +135,38 @@ struct MM_MapResult MM_Map(int pid, uint32_t address, int writable) {
 	ret.error = 0;
 
 	// Check for errors in the memory
-	if(MM_CheckMemInfo(pid, address, message)) {
+	if(check_mem_info(pid, address, message)) {
 		ret.error = 1;
 		goto finish_map;
 	}
 
-	// TODO: Reserve physical page zero for page table (maybe?)
-	uint8_t ppn = 0;
-	for(int i = 1; i < MM_PHYSICAL_PAGES; i++) {
-		if(phys_pages[i].valid == 0 || phys_pages[i].pid != pid) {
-			ppn = i;
-			break;
-		}
+	// Checks physical pages to see if they're ununsed (not valid) or don't belong to
+	// the current process. Reserve physical page zero for page table if swap is disabled
+	int ppn = -1;
+	for(int i = !(swap_enabled & 0x1); i < MM_PHYSICAL_PAGES; i++) {
+		if(phys_pages[i].valid && phys_pages[i].pid == pid)
+			continue;
+
+		ppn = i;
+		break;
 	}
 
-	if(ppn == 0) {
+	// If a viable physical page couldn't be found and swap is enabled, then checking for
+	// the best swap candidate is allowed
+	if(ppn == -1 && swap_enabled) {
+		// TODO: Be careful of the following:
+			// We have 4 page tables filled with page table zero, data table zero,
+			// page table 2, and data table 2. We want to write to data table
+			// one. We need to evict data pages preferrentially over page tables.
+			// There is a struct that tracks what pages hold in memory (data or
+			// page tables). TLDR; we never want to evict page tables which have
+			// data tables that are resident in memory.
+
+		ppn = swap_page(pid, vpn);
+	}
+
+	// If a physical page number couldn't be found, throw an error
+	if(ppn == -1) {
 		sprintf(message, "unable to find available page");
 		ret.error = 1;
 		goto finish_map;
@@ -164,7 +196,7 @@ finish_map:
 	return ret;
 }
 
-uint8_t MM_GetPPN(int pid, uint8_t vpn, int writeable) {
+int MM_GetPPN(int pid, uint8_t vpn, int writeable) {
 	// Can modify the contents of the struct, but not the pointer to the struct
 	struct process *const proc = &processes[pid];
 
@@ -177,13 +209,13 @@ uint8_t MM_GetPPN(int pid, uint8_t vpn, int writeable) {
 	// Throw an error if the entry is invalid
 	if(pte->valid == 0) {
 		DEBUG("invalid PTE entry\n");
-		return 0;
+		return -1;
 	}
 
 	// Throw an error if the entry is readonly
 	if(pte->writable == 0 && writeable) {
 		DEBUG("attempt to write to readonly\n");
-		return 0;
+		return -1;
 	}
 
 	// The physical page number is fetched from the PTE
@@ -202,8 +234,8 @@ int MM_LoadByte(int pid, uint32_t address, uint8_t *value) {
 	// Simple way to convert VPN to physical page number
 	// Find PTE in process' page table, then extract physical page number
 
-	uint8_t ppn = MM_GetPPN(pid, vpn, 0);
-	if(!ppn)
+	int ppn = MM_GetPPN(pid, vpn, 0);
+	if(ppn == -1)
 		return -1;
 
 	// Phyical pointer reassembled from PPN and offset
@@ -218,14 +250,6 @@ int MM_LoadByte(int pid, uint32_t address, uint8_t *value) {
 		// offset out of range, complain
 		// physical page is invalid, complain
 
-	// TODO: Be careful of the following:
-		// We have 4 page tables filled with page table zero, data table zero,
-		// page table 2, and data table 2. We want to write to data table
-		// one. We need to evict data pages preferrentially over page tables.
-		// There is a struct that tracks what pages hold in memory (data or
-		// page tables). TLDR; we never want to evict page tables which have
-		// data tables that are resident in memory.
-
 	return 0;
 }
 
@@ -234,8 +258,8 @@ int MM_StoreByte(int pid, uint32_t address, uint8_t value) {
 	uint8_t vpn = (uint8_t)(address >> MM_PAGE_SIZE_BITS);
 	uint8_t offset = (uint8_t)(address & MM_PAGE_OFFSET_MASK);
 
-	uint8_t ppn = MM_GetPPN(pid, vpn, 1);	
-	if(!ppn)
+	int ppn = MM_GetPPN(pid, vpn, 1);	
+	if(ppn == -1)
 		return -1;
 
 	// Phyical pointer reassembled from PPN and offset

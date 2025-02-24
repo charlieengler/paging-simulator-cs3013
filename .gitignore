@@ -1,6 +1,7 @@
 mm
 mm_test
-test.out
+tests.out
 
 *.d
 *.o
+*.swp
