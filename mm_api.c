@@ -92,6 +92,22 @@ void MM_SwapOn() {
 	swap_enabled = 1;
 }
 
+int MM_CheckMemInfo(int pid, uint32_t address, char message[128]) {
+	// PID out of range
+	if(pid >= MM_MAX_PROCESSES || pid < 0) {
+		sprintf(message, "pid out of range");
+		return 1;
+	}
+
+	// Address out of range
+	if(address > MM_PROCESS_VIRTUAL_MEMORY_SIZE_BYTES) {
+		sprintf(message, "address out of range");
+		return 1;
+	}
+
+	return 0;
+}
+
 struct MM_MapResult MM_Map(int pid, uint32_t address, int writable) {	
 	CHECK(sizeof(struct page_table_entry) <= MM_MAX_PTE_SIZE_BYTES);
 	uint8_t vpn = (uint8_t)(address >> MM_PAGE_SIZE_BITS);
@@ -103,14 +119,10 @@ struct MM_MapResult MM_Map(int pid, uint32_t address, int writable) {
 	sprintf(message, "success");
 	ret.error = 0;
 
-	// TODO: Check for the following errors (should be helper function):
-		// pid out of range, complain
-		// address out of range, complain
-		// offset out of range, complain
-
-	if(pid >= MM_MAX_PROCESSES || pid < 0) {
-		sprintf(message, "pid out of range");
+	// Check for errors in the memory
+	if(MM_CheckMemInfo(pid, address, message)) {
 		ret.error = 1;
+		goto finish_map;
 	}
 
 	// TODO: Reserve physical page zero for page table (maybe?)
