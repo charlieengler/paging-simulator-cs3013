@@ -28,12 +28,14 @@ struct page_table_entry {
 	// - if this is swapped
 
 	// TODO: Check to make sure 2 bits is actually enough later in code
-	uint8_t physical_page : 2;
+	uint8_t ppn : 2; // Physical page number
 
-	// c bit field (one bit is placed in the struct for swapped, valid, writeable)
-	uint8_t valid : 1;
-	uint8_t writable : 1;
-	uint8_t swapped : 1;
+	// c bit field (one bit is placed in the struct)
+	uint8_t valid : 1; 		// Is the data accessible, or not?
+	uint8_t writable : 1;	// Is the data read only, or writable?
+	uint8_t present : 1;	// Is the data in phys mem, or on disk?
+	uint8_t dirty : 1;		// Has the data been modified in mem, or not?
+	uint8_t accessed : 1;	// Has page been accessed yet, or not?
 };
 
 // Per-process metadata.
@@ -56,7 +58,7 @@ struct process {
 	// TODO: This is the simple way, but should be changed for the final submission
 	struct page_table_entry ptes[MM_NUM_PTES];
 
-	// Pointer to this processes page table, if resident in phys_mem.
+	// Pointer to this process' page table, if resident in phys_mem.
 	// This doesn't need to be used although is recommended.
 	struct page_table_entry *page_table;
 };
@@ -69,7 +71,10 @@ int swap_enabled = 0;
 // to eject.
 struct phys_page_entry {
 	// Information about what is in this physical page.
-	uint8_t valud : 1;
+	uint8_t valid : 1;
+
+	// TODO: Check if I'm necessary
+	int pid;
 };
 struct phys_page_entry phys_pages[MM_PHYSICAL_PAGES];
 
@@ -89,15 +94,61 @@ void MM_SwapOn() {
 
 struct MM_MapResult MM_Map(int pid, uint32_t address, int writable) {	
 	CHECK(sizeof(struct page_table_entry) <= MM_MAX_PTE_SIZE_BYTES);
-	uint32_t virtual_page = address >> MM_PAGE_SIZE_BITS;
-	struct process *const proc = &processes[pid];
+	uint8_t vpn = (uint8_t)(address >> MM_PAGE_SIZE_BITS);
+	uint8_t offset = (uint8_t)(address & MM_PAGE_OFFSET_MASK);
 
 	struct MM_MapResult ret = {0};
 	static char message[128];
 
-	sprintf(message, "unimplemented");
+	sprintf(message, "success");
+	ret.error = 0;
+
+	// TODO: Check for the following errors (should be helper function):
+		// pid out of range, complain
+		// address out of range, complain
+		// offset out of range, complain
+
+	if(pid >= MM_MAX_PROCESSES || pid < 0) {
+		sprintf(message, "pid out of range");
+		ret.error = 1;
+	}
+
+	// TODO: Reserve physical page zero for page table (maybe?)
+	uint8_t ppn = 0;
+	for(int i = 1; i < MM_PHYSICAL_PAGES; i++) {
+		if(phys_pages[i].valid == 0 || phys_pages[i].pid != pid) {
+			ppn = i;
+			break;
+		}
+	}
+
+	if(ppn == 0) {
+		sprintf(message, "unable to find available page");
+		ret.error = 1;
+		goto finish_map;
+	}
+
+	phys_pages[ppn].valid = 1;
+	phys_pages[ppn].pid = pid;
+
+	struct page_table_entry pte = {0};
+
+	pte.ppn = ppn;
+	pte.valid = 1;
+	pte.writable = writable;
+	pte.present = 1;
+	pte.dirty = 0;
+	pte.accessed = 0;
+
+	// TODO: This is the temporary array for storing PTEs and should be switched for
+	//		 a reference to a dedicated page holding this processes page table
+	struct process *const proc = &processes[pid];
+	proc->ptes[vpn] = pte;
+	proc->page_table = proc->ptes;
+
+finish_map:
 	ret.message = message;
-	ret.error = 1;
+
 	return ret;
 }
 
@@ -122,20 +173,22 @@ int MM_LoadByte(int pid, uint32_t address, uint8_t *value) {
 
 		// Use vpn as index to find PTE for this page
 		struct page_table_entry *pte = &proc->page_table[vpn];
-		uint32_t physical_page_num = pte->physical_page;
+		// The physical page number is fetched from the PTE
+		uint8_t ppn = pte->ppn;
 
 	// -------------------------------------------------------------------------------
 
 	// Phyical pointer reassembled from PPN and offset
-	uint32_t physical_address = (physical_page_num << NUM_PAGE_SIZE_BITS) | offset;
+	uint32_t physical_address = ((uint32_t)ppn << MM_PAGE_SIZE_BITS) | offset;
 
 	// Now we can get values from physical memory
 	// *value = phys_mem[physical_address];
 
-	// TODO: Check for the following errors:
+	// TODO: Check for the following errors (should be helper function):
 		// pid out of range, complain
 		// address out of range, complain
 		// offset out of range, complain
+		// physical page is invalid, complain
 
 	// TODO: Be careful of the following:
 		// We have 4 page tables filled with page table zero, data table zero,
