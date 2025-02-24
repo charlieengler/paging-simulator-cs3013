@@ -26,6 +26,14 @@ struct page_table_entry {
 	// - permissions
 	// - if this is valid
 	// - if this is swapped
+
+	// TODO: Check to make sure 2 bits is actually enough later in code
+	uint8_t physical_page : 2;
+
+	// c bit field (one bit is placed in the struct for swapped, valid, writeable)
+	uint8_t valid : 1;
+	uint8_t writable : 1;
+	uint8_t swapped : 1;
 };
 
 // Per-process metadata.
@@ -45,7 +53,8 @@ struct process {
 	// For simplicity, the page table for this process can be kept in this structure.
 	// However, this won't achieve a perfect grade; ideal implementations are aware
 	// of page tables stored in the memory itself and can handle swapping out page tables.
-	// struct page_table_entry ptes[MM_NUM_PTES];
+	// TODO: This is the simple way, but should be changed for the final submission
+	struct page_table_entry ptes[MM_NUM_PTES];
 
 	// Pointer to this processes page table, if resident in phys_mem.
 	// This doesn't need to be used although is recommended.
@@ -93,11 +102,52 @@ struct MM_MapResult MM_Map(int pid, uint32_t address, int writable) {
 }
 
 int MM_LoadByte(int pid, uint32_t address, uint8_t *value) {
-	return -1;
+	uint8_t vpn = (uint8_t)(address >> MM_PAGE_SIZE_BITS);
+	uint8_t offset = (uint8_t)(address & MM_PAGE_OFFSET_MASK);
+
+	// This is an example of the debug macro run when you pick a specific test to run
+	// DEBUG("Virtual Address is 0x%x\n", address);
+
+	// Simple way to convert VPN to physical page number
+	// Find PTE in process' page table, then extract physical page number
+
+	// TODO: Might want to put the following block in its own helper function
+	// -------------------------------------------------------------------------------
+
+		// Can modify the contents of the struct, but not the pointer to the struct
+		struct process *const proc = &processes[pid];
+
+		if(proc->page_table == NULL)
+			proc->page_table = &proc->ptes[0];
+
+		// Use vpn as index to find PTE for this page
+		struct page_table_entry *pte = &proc->page_table[vpn];
+		uint32_t physical_page_num = pte->physical_page;
+
+	// -------------------------------------------------------------------------------
+
+	// Phyical pointer reassembled from PPN and offset
+	uint32_t physical_address = (physical_page_num << NUM_PAGE_SIZE_BITS) | offset;
+
+	// Now we can get values from physical memory
+	// *value = phys_mem[physical_address];
+
+	// TODO: Check for the following errors:
+		// pid out of range, complain
+		// address out of range, complain
+		// offset out of range, complain
+
+	// TODO: Be careful of the following:
+		// We have 4 page tables filled with page table zero, data table zero,
+		// page table 2, and data table 2. We want to write to data table
+		// one. We need to evict data pages preferrentially over page tables.
+		// There is a struct that tracks what pages hold in memory (data or
+		// page tables). TLDR; we never want to evict page tables which have
+		// data tables that are resident in memory.
+
+	return 0;
 }
 
 int MM_StoreByte(int pid, uint32_t address, uint8_t value) {
 	return -1;
 }	
-
-

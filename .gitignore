@@ -1,5 +1,6 @@
 mm
 mm_test
+test.out
 
 *.d
 *.o
