@@ -152,6 +152,34 @@ finish_map:
 	return ret;
 }
 
+uint8_t MM_GetPPN(int pid, uint8_t vpn, int writeable) {
+	// Can modify the contents of the struct, but not the pointer to the struct
+	struct process *const proc = &processes[pid];
+
+	if(proc->page_table == NULL)
+		proc->page_table = &proc->ptes[0];
+
+	// Use vpn as index to find PTE for this page
+	struct page_table_entry *pte = &proc->page_table[vpn];
+
+	// Throw an error if the entry is invalid
+	if(pte->valid == 0) {
+		DEBUG("invalid PTE entry");
+		return 0;
+	}
+
+	// Throw an error if the entry is readonly
+	if(pte->writable != writeable) {
+		DEBUG("attempt to write to readonly");
+		return 0;
+	}
+
+	// The physical page number is fetched from the PTE
+	uint8_t ppn = pte->ppn;
+
+	return ppn;
+}
+
 int MM_LoadByte(int pid, uint32_t address, uint8_t *value) {
 	uint8_t vpn = (uint8_t)(address >> MM_PAGE_SIZE_BITS);
 	uint8_t offset = (uint8_t)(address & MM_PAGE_OFFSET_MASK);
@@ -162,21 +190,9 @@ int MM_LoadByte(int pid, uint32_t address, uint8_t *value) {
 	// Simple way to convert VPN to physical page number
 	// Find PTE in process' page table, then extract physical page number
 
-	// TODO: Might want to put the following block in its own helper function
-	// -------------------------------------------------------------------------------
-
-		// Can modify the contents of the struct, but not the pointer to the struct
-		struct process *const proc = &processes[pid];
-
-		if(proc->page_table == NULL)
-			proc->page_table = &proc->ptes[0];
-
-		// Use vpn as index to find PTE for this page
-		struct page_table_entry *pte = &proc->page_table[vpn];
-		// The physical page number is fetched from the PTE
-		uint8_t ppn = pte->ppn;
-
-	// -------------------------------------------------------------------------------
+	uint8_t ppn = MM_GetPPN(pid, vpn, 1);	
+	if(!ppn)
+		return -1;
 
 	// Phyical pointer reassembled from PPN and offset
 	uint32_t physical_address = ((uint32_t)ppn << MM_PAGE_SIZE_BITS) | offset;
@@ -206,34 +222,9 @@ int MM_StoreByte(int pid, uint32_t address, uint8_t value) {
 	uint8_t vpn = (uint8_t)(address >> MM_PAGE_SIZE_BITS);
 	uint8_t offset = (uint8_t)(address & MM_PAGE_OFFSET_MASK);
 
-	// TODO: Might want to put the following block in its own helper function
-	// -------------------------------------------------------------------------------
-
-		// Can modify the contents of the struct, but not the pointer to the struct
-		struct process *const proc = &processes[pid];
-
-		if(proc->page_table == NULL)
-			proc->page_table = &proc->ptes[0];
-
-		// Use vpn as index to find PTE for this page
-		struct page_table_entry *pte = &proc->page_table[vpn];
-
-		// Throw an error if the entry is invalid
-		if(pte->valid == 0) {
-			DEBUG("invalid entry when storing byte");
-			return -1;
-		}
-
-		// Throw an error if the entry is readonly
-		if(pte->writable == 0) {
-			DEBUG("attempt to write to readonly when storing byte");
-			return -1;
-		}
-
-		// The physical page number is fetched from the PTE
-		uint8_t ppn = pte->ppn;
-
-	// -------------------------------------------------------------------------------
+	uint8_t ppn = MM_GetPPN(pid, vpn, 1);	
+	if(!ppn)
+		return -1;
 
 	// Phyical pointer reassembled from PPN and offset
 	uint32_t physical_address = ((uint32_t)ppn << MM_PAGE_SIZE_BITS) | offset;
@@ -241,4 +232,4 @@ int MM_StoreByte(int pid, uint32_t address, uint8_t value) {
 	phys_mem[physical_address] = value;
 	
 	return 0;
-}	
+}
