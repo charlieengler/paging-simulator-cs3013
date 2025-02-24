@@ -182,7 +182,7 @@ int MM_LoadByte(int pid, uint32_t address, uint8_t *value) {
 	uint32_t physical_address = ((uint32_t)ppn << MM_PAGE_SIZE_BITS) | offset;
 
 	// Now we can get values from physical memory
-	// *value = phys_mem[physical_address];
+	*value = phys_mem[physical_address];
 
 	// TODO: Check for the following errors (should be helper function):
 		// pid out of range, complain
