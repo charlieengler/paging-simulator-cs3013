@@ -6,6 +6,8 @@
 
 #include "mm_api.h"
 
+// TODO: YOUR VARIABLE NAMES ARE TERRIBLE, FIX THEM!!!
+
 int debug = 0;
 void Debug() { debug = 1; }
 // This is a helpful macro for adding debug prints through the code. Use it like printf.
@@ -21,12 +23,6 @@ uint8_t phys_mem[MM_PHYSICAL_MEMORY_SIZE_BYTES];
 
 // A simple page table entry.
 struct page_table_entry {
-	// We need to track:
-	// - physical page number
-	// - permissions
-	// - if this is valid
-	// - if this is swapped
-
 	// TODO: Check to make sure 2 bits is actually enough later in code
 	uint8_t ppn : 2; // Physical page number
 
@@ -81,6 +77,9 @@ int swap_enabled = 0;
 // to eject.
 struct phys_page_entry {
 	// Information about what is in this physical page.
+	// TODO: Consider using 2 bits for this because it will be sufficient for this project.
+	// 		 That being said, document this well if you go with that design decision.
+	//		 It would just be nice because it would make this struct exactly 2 bytes.
 	int pid; // The ID of process using this page
 	uint8_t valid : 1; // Is the page entry in use
 	uint8_t is_page_table : 1; // 0 = data table, 1 = page table
@@ -103,11 +102,15 @@ void MM_SwapOn() {
 			FILE *swp = fopen(path, "w+");
 
 			processes[i].swap_file = swp;
+			processes[i].page_table_resident = 0;
+			processes[i].page_table_exists = 0;
 		}
 
-		// Initialize all physical page entry PIDs to 1
-		for(int i = 0; i < MM_PHYSICAL_PAGES; i++)
+		// Initialize all physical page entries
+		for(int i = 0; i < MM_PHYSICAL_PAGES; i++) {
 			phys_pages[i].pid = -1;
+			phys_pages[i].vpn = -1;
+		}
 	}
 
 	swap_enabled = 1;
@@ -163,6 +166,7 @@ int eject_page(struct page_table_entry *old_pte, struct page_table_entry *new_pt
 	int ppn = old_pte->ppn;
 
 	// TODO: Check to make sure PPN is valid and holding the data we think it is
+	// TODO: Check to see if the page we're ejecting is a page table
 
 	// DEBUG("Swapped PPN: %d\n", ppn);
 	// DEBUG("Ejected PTE:\n");
@@ -186,6 +190,7 @@ finish_ejection:
 	// TODO: Error checking
 	load_page(new_pte, ppn, new_pid, new_vpn);
 
+	// TODO: Find a place for these
 	// phys_pages[ppn].pid = -1;
 	// phys_pages[ppn].is_page_table = 0;
 	// phys_pages[ppn].vpn = -1;
@@ -213,10 +218,11 @@ int swap_page(int pid, struct page_table_entry *fresh_pte, uint8_t vpn) {
 
 	// The highest the accessed field can reach is 3 (max of 2 bits)
 	int lowest_accessed = 4;
-	struct page_table_entry *ejected_pte = &ptes[0];
+	struct page_table_entry *ejected_pte = &ptes[1];
 	// By the time we get here, all of the physical pages should belong to the
-	// same process, so we don't have to check the PID
-	for(int i = 0; i < MM_NUM_PTES; i++) {
+	// same process, so we don't have to check the PID. We reserve the first PTE
+	// for the page table itself
+	for(int i = 1; i < MM_NUM_PTES; i++) {
 		// If the PTE isn't in memory, then we continue
 		if(!(&ptes[i])->present)
 			continue;
@@ -244,10 +250,39 @@ int swap_page(int pid, struct page_table_entry *fresh_pte, uint8_t vpn) {
 	return ppn;
 }
 
+// TODO: Implement me
+int create_page_table() {
+
+}
+
+// TODO: Implement me
+int load_page_table() {
+
+}
+
+// TODO: Implement me
+// TODO: Should return old PPN of page table
+// TODO: Only eject page table if not data table for the
+//   	 same process is resident in memory
+int eject_page_table() {
+
+}
+
 // TODO: Throw page faults on errors
-// TODO: Consider passing process to this function as it's needed twice in store byte
 int get_ppn(int pid, struct page_table_entry *pte, uint8_t vpn, int writeable) {
 	struct process *const proc = &processes[pid];
+
+	// TODO: Check if process' page table is resident in memory or exists just in case
+	if(!proc->page_table_resident || !proc->page_table_exists) {
+		// TODO: Check if process has page table allocated
+		if(proc->page_table_exists) {
+			// TODO: Error checking
+			load_page_table();
+		} else {
+			// TODO: Error checking
+			create_page_table();
+		}
+	}
 
 	// Throw an error if the entry is invalid
 	if(pte->valid == 0) {
@@ -261,11 +296,10 @@ int get_ppn(int pid, struct page_table_entry *pte, uint8_t vpn, int writeable) {
 
 	// Checks physical pages to see if they're ununsed (not valid) or don't belong to
 	// the current process. If swap is disabled, reserve index 0 for page table
+	// TODO: We should be able to remove the check for swap enabled after page tables are
+	//		 placed in memory only
 	int ppn = -1;
 	for(int i = !(swap_enabled & 0x1); i < MM_PHYSICAL_PAGES; i++) {
-		// TODO: Properly handle the ejection of page tables (i.e. do not eject the page
-		// 		 table of the currently running process)
-
 		if(phys_pages[i].valid && phys_pages[i].pid == pid)
 			continue;
 
@@ -275,6 +309,12 @@ int get_ppn(int pid, struct page_table_entry *pte, uint8_t vpn, int writeable) {
 		// If we overwrite a page from another process, make sure it's ejected
 		// gracefully (if the data has been modified, it's written to disk)
 		if(phys_pages[i].valid && phys_pages[i].pid != pid && swap_enabled) {
+			// Ejecting page tables is handled differently
+			if(phys_pages[i].is_page_table) {
+				ppn = eject_page_table();
+				break;
+			}
+
 			struct process *const old_proc = &processes[phys_pages[i].pid];
 			if(old_proc->page_table == NULL)
 				old_proc->page_table = &old_proc->ptes[0];
