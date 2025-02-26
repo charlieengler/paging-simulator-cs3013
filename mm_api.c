@@ -68,6 +68,14 @@ struct process {
 	struct page_table_entry *page_table;
 };
 
+void print_process(struct process *proc) {
+	DEBUG("Process:\n");
+	DEBUG("		Resident: 	%d\n", proc->page_table_resident);
+	DEBUG("		Exists: 	%d\n", proc->page_table_exists);
+	DEBUG("		Swap File: 	%p\n", (void*)proc->swap_file);
+	DEBUG("		Page Table: %p\n", (void*)proc->page_table);
+}
+
 struct process processes[MM_MAX_PROCESSES];
 
 int swap_enabled = 0;
@@ -140,14 +148,12 @@ int load_page(struct page_table_entry *pte, int ppn, int new_pid, uint8_t vpn) {
 	struct process *const proc = &processes[new_pid];
 	// DEBUG("Swap file pointer: %p\n", (void*)proc->swap_file);
 	FILE *swap_page = proc->swap_file;
-	int err = fseek(swap_page, vpn * MM_PAGE_SIZE_BYTES, SEEK_SET);
-	if(err != -1) {
-		uint8_t *mem = (uint8_t*)phys_mem_addr_for_phys_page_entry(&phys_pages[ppn]);
-		for(int i = 0; i < MM_PAGE_SIZE_BYTES; i++) {
-			uint8_t c = fgetc(swap_page);
+	fseek(swap_page, vpn * MM_PAGE_SIZE_BYTES, SEEK_SET);
+	uint8_t *mem = (uint8_t*)phys_mem_addr_for_phys_page_entry(&phys_pages[ppn]);
+	for(int i = 0; i < MM_PAGE_SIZE_BYTES; i++) {
+		uint8_t c = fgetc(swap_page);
 
-			mem[i] = c;
-		}
+		mem[i] = c;
 	}
 
 	phys_pages[ppn].pid = new_pid;
@@ -200,54 +206,6 @@ int eject_page(struct page_table_entry *pte, int pid) {
 	return ppn;
 }
 
-// Returns the PPN that the page was swapped into (-1 on failure)
-int swap_page(int pid, struct page_table_entry *fresh_pte, uint8_t vpn) {
-	// DEBUG("Swapped PTE:\n");
-	// print_pte(fresh_pte);
-
-	struct process *const proc = &processes[pid];
-
-	if(proc->page_table == NULL)
-		proc->page_table = &proc->ptes[0];
-
-	struct page_table_entry *ptes = proc->page_table;
-
-	// The highest the accessed field can reach is 3 (max of 2 bits)
-	int lowest_accessed = 4;
-	struct page_table_entry *ejected_pte = &ptes[0];
-	// By the time we get here, all of the physical pages should belong to the
-	// same process, so we don't have to check the PID. We reserve the first PTE
-	// for the page table itself
-	for(int i = 0; i < MM_NUM_PTES; i++) {
-		// If the PTE isn't in memory, then we continue
-		if(!(&ptes[i])->present)
-			continue;
-
-		// If the PTE is the page table, then we shouldn't swap it
-		if(phys_pages[(&ptes[i])->ppn].is_page_table)
-			continue;
-
-		// Otherwise, pick the page with the least accesses
-		if((&ptes[i])->accesses < lowest_accessed) {
-			ejected_pte = &ptes[i];
-			lowest_accessed = ejected_pte->accesses;
-		}
-	}
-
-	int ppn = eject_page(ejected_pte, pid);
-	ppn = load_page(fresh_pte, ppn, pid, vpn);
-
-	// DEBUG("Ejected PPN: %d\n", ppn);
-
-	if(ppn == -1) {
-		DEBUG("unable to find viable ppn\n");
-		return -1;
-	}
-
-	return ppn;
-}
-
-// TODO: Implement me
 // TODO: Should return old PPN of page table
 // TODO: Should maybe eject all associated data tables, too
 int eject_page_table(int ppn, int pid) {
@@ -277,13 +235,72 @@ int eject_page_table(int ppn, int pid) {
 	return ppn;
 }
 
+// Returns the PPN that the page was swapped into (-1 on failure)
+int swap_page(int pid, struct page_table_entry *fresh_pte, uint8_t vpn) {
+	// DEBUG("Swapped PTE:\n");
+	// print_pte(fresh_pte);
+
+	struct process *const proc = &processes[pid];
+
+	if(proc->page_table == NULL)
+		proc->page_table = &proc->ptes[0];
+
+	struct page_table_entry *ptes = proc->page_table;
+
+	// The highest the accessed field can reach is 3 (max of 2 bits)
+	int lowest_accessed = 4;
+	struct page_table_entry *ejected_pte = NULL;
+	// By the time we get here, all of the physical pages should belong to the
+	// same process, so we don't have to check the PID. We reserve the first PTE
+	// for the page table itself
+	for(int i = 0; i < MM_NUM_PTES; i++) {
+		// If the PTE isn't in memory, then we continue
+		if(!(&ptes[i])->present)
+			continue;
+
+		// If the PTE is the page table, then we shouldn't swap it
+		if(phys_pages[(&ptes[i])->ppn].is_page_table)
+			continue;
+
+		// Otherwise, pick the page with the least accesses
+		if((&ptes[i])->accesses < lowest_accessed) {
+			ejected_pte = &ptes[i];
+			lowest_accessed = ejected_pte->accesses;
+		}
+	}
+
+	int ppn = -1;
+	if(ejected_pte == NULL) {
+		for(int i = 0; i < MM_PHYSICAL_PAGES; i++) {
+			if(phys_pages[i].pid != pid) {
+				ppn = eject_page_table(i, phys_pages[i].pid);
+				break;
+			}
+		}
+		
+		ppn = load_page(fresh_pte, ppn, pid, vpn);
+	} else {
+		ppn = eject_page(ejected_pte, pid);
+		ppn = load_page(fresh_pte, ppn, pid, vpn);
+	}
+
+	// DEBUG("Ejected PPN: %d\n", ppn);
+
+	if(ppn == -1) {
+		DEBUG("unable to find viable ppn\n");
+		return -1;
+	}
+
+	return ppn;
+}
+
 int get_page_table_ppn(int pid) {
 	// The PPN should always be assigned here, so zero is a fine default
 	int ppn = 0;
 
 	// We would prefer to assign to a page that isn't already a page table, though
 	for(int i = 0; i < MM_PHYSICAL_PAGES; i++) {
-		if(!phys_pages[i].is_page_table) {
+		if(!phys_pages[i].is_page_table && !phys_pages[i].valid) {
 			ppn = i;
 			break;
 		}
@@ -300,9 +317,9 @@ int get_page_table_ppn(int pid) {
 	// TODO: Eject page and/or page table
 	if(phys_pages[ppn].is_page_table) {
 		ppn = eject_page_table(ppn, pid);
+		
 	} else {
 		struct page_table_entry *pte = &(proc->page_table[phys_pages[ppn].vpn]);
-
 		ppn = eject_page(pte, pid);
 	}
 
@@ -397,6 +414,15 @@ int get_ppn(int pid, struct page_table_entry *pte, uint8_t vpn, int writeable) {
 		return -1;
 	}
 
+	// if(pte->present) {
+	// 	DEBUG("Get:\n");
+	// 	print_pte(pte);
+	// 	DEBUG("%p\n", (void*)pte);
+	// 	DEBUG("%d\n", pid);
+	// 	DEBUG("%d\n", vpn);
+	// 	DEBUG("\n");
+	// }
+
 	// If the page is already present in memory, then just return it's PPN
 	if(pte->present)
 		return pte->ppn;
@@ -410,27 +436,29 @@ int get_ppn(int pid, struct page_table_entry *pte, uint8_t vpn, int writeable) {
 			break;
 		}
 
-		if(phys_pages[i].pid == pid)
-			continue;
+		// if(!swap_enabled)
+		// 	continue;
 
-		// Ejecting page tables is handled differently
-		if(phys_pages[i].is_page_table) {
-			ppn = eject_page_table(ppn, pid);
-			ppn = load_page(pte, ppn, pid, vpn);
-			break;
-		}
+		// if(phys_pages[i].pid == pid)
+		// 	continue;
 
-		struct process *const old_proc = &processes[phys_pages[i].pid];
-		if(old_proc->page_table == NULL)
-			old_proc->page_table = &old_proc->ptes[0];
+		// // Ejecting page tables is handled differently
+		// if(phys_pages[i].is_page_table) {
+		// 	ppn = eject_page_table(ppn, pid);
+		// 	break;
+		// }
 
-		struct page_table_entry *old_pte = &(old_proc->page_table[phys_pages[i].vpn]);
+		// struct process *const old_proc = &processes[phys_pages[i].pid];
+		// if(old_proc->page_table == NULL)
+		// 	old_proc->page_table = &old_proc->ptes[0];
 
-		ppn = eject_page(old_pte, pid);
-		ppn = load_page(pte, ppn, pid, vpn);
-		// DEBUG("Different PID Ejected PPN: %d\n", ppn);
-		// DEBUG("Different PID i value PPN: %d\n", i);
-		break;
+		// struct page_table_entry *old_pte = &(old_proc->page_table[phys_pages[i].vpn]);
+
+		// // ppn = eject_page(old_pte, pid);
+		// // ppn = load_page(pte, ppn, pid, vpn);
+		// // DEBUG("Different PID Ejected PPN: %d\n", ppn);
+		// // DEBUG("Different PID i value PPN: %d\n", i);
+		// break;
 	}
 
 	if(phys_pages[ppn].valid) {
@@ -468,28 +496,29 @@ struct MM_MapResult MM_Map(int pid, uint32_t address, int writeable) {
 		return ret;
 	}
 
-	struct page_table_entry pte = {0};
+	struct page_table_entry temp_pte = {0};
+	struct page_table_entry *pte = &temp_pte;
 
-	pte.valid = 1;
-	pte.writeable = writeable;
-	pte.present = 0;
-	pte.dirty = 0;
-	pte.accesses = 0;
+	pte->valid = 1;
+	pte->writeable = writeable;
+	pte->present = 0;
+	pte->dirty = 0;
+	pte->accesses = 0;
 
-	int ppn = get_ppn(pid, &pte, vpn, writeable);
+	int ppn = get_ppn(pid, pte, vpn, writeable);
 
 	if(ppn > -1 && ppn < MM_PHYSICAL_PAGES) {
 		phys_pages[ppn].pid = pid;
 		phys_pages[ppn].valid = 1;
-		// TODO: phys_pages[ppn].is_page_table
+		phys_pages[ppn].is_page_table = 0;
 		phys_pages[ppn].vpn = vpn;
 
-		pte.ppn = ppn;
-		pte.present = 1;
+		pte->ppn = ppn;
+		pte->present = 1;
 	}
 
 	struct process *const proc = &processes[pid];
-	proc->page_table[vpn] = pte;
+	proc->page_table[vpn] = *pte;
 
 	if(!swap_enabled && ppn == -1) {
 		sprintf(message, "swap disabled and pages full");
@@ -550,6 +579,13 @@ int MM_StoreByte(int pid, uint32_t address, uint8_t value) {
 		DEBUG("attempt to write to readonly\n");
 		return -1;
 	}
+
+	// DEBUG("Store:\n");
+	// print_pte(pte);
+	// DEBUG("%p\n", (void*)pte);
+	// DEBUG("%d\n", pid);
+	// DEBUG("%d\n", vpn);
+	// DEBUG("\n");
 
 	int ppn = get_ppn(pid, pte, vpn, 1);	
 	if(ppn == -1)
