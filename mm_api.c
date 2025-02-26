@@ -19,7 +19,14 @@ void Debug() { debug = 1; }
 // All implementation goes in this file.                                     //
 ///////////////////////////////////////////////////////////////////////////////
 
-uint8_t phys_mem[MM_PHYSICAL_MEMORY_SIZE_BYTES];
+uint8_t phys_mem[MM_PHYSICAL_MEMORY_SIZE_BYTES] = {0};
+
+void dump_mem(int ppn) {
+	for(int i = ppn * MM_PAGE_SIZE_BYTES; i < (ppn+1) * MM_PAGE_SIZE_BYTES; i++)
+		printf("%d ", phys_mem[i]);
+
+	printf("\n\n");
+}
 
 // A simple page table entry.
 struct page_table_entry {
@@ -102,11 +109,16 @@ void *phys_mem_addr_for_phys_page_entry(struct phys_page_entry *phys_page) {
 
 void MM_SwapOn() {
 	if (!swap_enabled) {
+		char swap_initial[] = {1};
+
 		// Create swap files for each process
 		for(int i = 0; i < MM_MAX_PROCESSES; i++) {
 			char path[9] = {0};
 			sprintf(path, "./%d.swp", i);
 			FILE *swp = fopen(path, "w+");
+			for(int j = 0; j < (MM_PAGE_SIZE_BYTES + 1) * MM_NUM_PTES; j++)
+				fputc(0, swp);
+			
 
 			processes[i].page_table_resident = 0;
 			processes[i].page_table_exists = 0;
@@ -151,9 +163,12 @@ int load_page(struct page_table_entry *pte, int ppn, int new_pid, uint8_t vpn) {
 	fseek(swap_page, vpn * MM_PAGE_SIZE_BYTES, SEEK_SET);
 	uint8_t *mem = (uint8_t*)phys_mem_addr_for_phys_page_entry(&phys_pages[ppn]);
 	for(int i = 0; i < MM_PAGE_SIZE_BYTES; i++) {
-		uint8_t c = fgetc(swap_page);
+		int c = fgetc(swap_page);
 
-		mem[i] = c;
+		if(c == EOF)
+			c = 0;
+
+		mem[i] = (uint8_t)c;
 	}
 
 	phys_pages[ppn].pid = new_pid;
@@ -171,6 +186,7 @@ int load_page(struct page_table_entry *pte, int ppn, int new_pid, uint8_t vpn) {
 }
 
 // Returns the PPN that was ejected (-1 on failure)
+// TODO: PID argument might be useless
 int eject_page(struct page_table_entry *pte, int pid) {
 	int ppn = pte->ppn;
 
@@ -183,7 +199,7 @@ int eject_page(struct page_table_entry *pte, int pid) {
 
 	// If the data hasn't been modified, then it can just be ejected
 	if(pte->dirty) {
-		struct process *const proc = &processes[pid];
+		struct process *const proc = &processes[phys_pages[ppn].pid];
 		FILE *swap_page = proc->swap_file;
 		fseek(swap_page, phys_pages[ppn].vpn * MM_PAGE_SIZE_BYTES, SEEK_SET);
 		uint8_t *mem = (uint8_t*)phys_mem_addr_for_phys_page_entry(&phys_pages[ppn]);
@@ -198,7 +214,6 @@ int eject_page(struct page_table_entry *pte, int pid) {
 	phys_pages[ppn].is_page_table = 0;
 	
 	pte->ppn = -1;
-	pte->valid = 1;
 	pte->present = 0;
 	pte->dirty = 0;
 	pte->accesses = 0;
@@ -374,9 +389,12 @@ int load_page_table(int pid) {
 	fseek(swap_page, MM_NUM_PTES * MM_PAGE_SIZE_BYTES, SEEK_SET);
 	uint8_t *mem = (uint8_t*)phys_mem_addr_for_phys_page_entry(&phys_pages[ppn]);
 	for(int i = 0; i < MM_PAGE_SIZE_BYTES; i++) {
-		uint8_t c = fgetc(swap_page);
+		int c = fgetc(swap_page);
 
-		mem[i] = c;
+		if(c == EOF)
+			c = 0;
+
+		mem[i] = (uint8_t)c;
 	}
 
 	phys_pages[ppn].pid = pid;
@@ -409,10 +427,10 @@ int get_ppn(int pid, struct page_table_entry *pte, uint8_t vpn, int writeable) {
 	}
 
 	// Throw an error if the entry is invalid
-	if(pte->valid == 0) {
-		DEBUG("invalid PTE entry\n");
-		return -1;
-	}
+	// if(pte->valid == 0) {
+	// 	DEBUG("invalid PTE entry\n");
+	// 	return -1;
+	// }
 
 	// if(pte->present) {
 	// 	DEBUG("Get:\n");
@@ -542,6 +560,7 @@ int MM_LoadByte(int pid, uint32_t address, uint8_t *value) {
 	// Use vpn as index to find PTE for this page
 	struct page_table_entry *pte = &proc->page_table[vpn];
 
+	MM_Map(pid, address, 0);
 	int ppn = get_ppn(pid, pte, vpn, 0);
 	if(ppn == -1)
 		return -1;
@@ -587,6 +606,7 @@ int MM_StoreByte(int pid, uint32_t address, uint8_t value) {
 	// DEBUG("%d\n", vpn);
 	// DEBUG("\n");
 
+	MM_Map(pid, address, 1);
 	int ppn = get_ppn(pid, pte, vpn, 1);	
 	if(ppn == -1)
 		return -1;
