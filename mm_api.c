@@ -288,6 +288,7 @@ int swap_page(int pid, struct page_table_entry *fresh_pte, uint8_t vpn) {
 	struct page_table_entry *ptes = proc->page_table;
 
 	if(ppn == -1) {
+		DEBUG("Page Table: %d %d\n", phys_pages[ppn].pid, phys_pages[ppn].vpn);
 		// Eject the first page table that isn't in use from memory
 		for(int i = 0; i < MM_PHYSICAL_PAGES; i++) {
 			if(phys_pages[i].pid != pid) {
@@ -518,19 +519,21 @@ int MM_LoadByte(int pid, uint32_t address, uint8_t *value) {
 	// Use vpn as index to find PTE for this page
 	struct page_table_entry *pte = &proc->page_table[vpn];
 
-	if(!pte->valid)
-		return -1;
-
 	if(!pte->present) {
 		// TODO: Error checking
 		MM_Map(pid, address, 0);
 	}
 
+	if(!pte->valid) {
+		return -1;
+	}
+
 	int ppn = pte->ppn;
 
 	// TODO: Better error checking
-	if(ppn == -1)
+	if(ppn == -1) {
 		return -1;
+	}
 
 	// Phyical pointer reassembled from PPN and offset
 	uint32_t physical_address = ((uint32_t)ppn << MM_PAGE_SIZE_BITS) | offset;
@@ -577,8 +580,9 @@ int MM_StoreByte(int pid, uint32_t address, uint8_t value) {
 	int ppn = pte->ppn;	
 
 	// TODO: Better error checking
-	if(ppn == -1)
+	if(ppn == -1) {
 		return -1;
+	}
 
 	// Data in this pte has been modified, so it needs to be rewritten to disk
 	pte->dirty = 1;
@@ -587,6 +591,7 @@ int MM_StoreByte(int pid, uint32_t address, uint8_t value) {
 	uint32_t physical_address = ((uint32_t)ppn << MM_PAGE_SIZE_BITS) | offset;
 
 	phys_mem[physical_address] = value;
+
 	// printf("Store PID %d, VPN %d:\n", pid, vpn);
 	// dump_mem(ppn);
 	
