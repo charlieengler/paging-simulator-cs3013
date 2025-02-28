@@ -146,15 +146,22 @@ int eject_phys_page(int reserving_pid) {
 	// TODO: This could just be renamed to ppn because it refers to the same thing whether it's the new data or not
 	int ppn_to_eject = -1;
 	for(int i = 0; i < MM_PHYSICAL_PAGES; i++) {
-		if(phys_pages[i].pid != reserving_pid) {
+		if(phys_pages[i].pid != reserving_pid && !phys_pages[i].is_page_table) {
 			ppn_to_eject = i;
 			break;
 		}
 
 		if(!phys_pages[i].is_page_table)
 			ppn_to_eject = i;
+	}
 
-		// TODO: There should be a backup if all physical pages are page tables
+	if(ppn_to_eject == -1) {
+		for(int i = 0; i < MM_PHYSICAL_PAGES; i++) {
+			if(phys_pages[i].pid != reserving_pid) {
+				ppn_to_eject = i;
+				break;
+			}
+		}
 	}
 
 	if(ppn_to_eject == -1) {
@@ -172,15 +179,14 @@ int eject_phys_page(int reserving_pid) {
 		vpn_to_eject = phys_pages[ppn_to_eject].vpn;
 
 		struct page_table_entry *pte_to_eject = &(proc->page_table[vpn_to_eject]);
-		pte_to_eject->ppn = -1;
+		pte_to_eject->ppn = 0;
 		pte_to_eject->present = 0;
 		is_dirty = pte_to_eject->dirty;
 		pte_to_eject->dirty = 0;
 		pte_to_eject->accesses = 0;
+	} else {
+		proc->page_table_resident = 0;
 	}
-
-	// DEBUG("Ejecting PPN: %d\n", ppn_to_eject);
-	// dump_mem(ppn_to_eject);
 
 	if(is_dirty) {
 		FILE *swap_file = proc->swap_file;
@@ -189,7 +195,7 @@ int eject_phys_page(int reserving_pid) {
 		uint8_t *mem = (uint8_t*)phys_mem_addr_for_phys_page_entry(&phys_pages[ppn_to_eject]);
 
 		for(int i = 0; i < MM_PAGE_SIZE_BYTES; i++)
-			fprintf(swap_file, "%c", mem[i]);
+			fputc(mem[i], swap_file);
 	}
 
 	phys_pages[ppn_to_eject].pid = -1;
@@ -262,8 +268,8 @@ int load_page(struct page_table_entry *pte, int pid, int vpn) {
 		return -1;
 	}
 
-	if(phys_pages[pte->ppn].valid && !swap_enabled) {
-		DEBUG("attempted to load page into valid physical page with swap disabled\n");
+	if(phys_pages[pte->ppn].valid) {
+		DEBUG("attempted to load page into valid physical page\n");
 		return -1;
 	}
 
@@ -278,11 +284,6 @@ int load_page(struct page_table_entry *pte, int pid, int vpn) {
 	}
 
 	if(swap_enabled) {
-		if(phys_pages[pte->ppn].valid) {
-			DEBUG("attempted to load page into valid physical page with swap enabled\n");
-			return -1;
-		}
-
 		struct process *const proc = &processes[pid];
 	
 		// TODO: Maybe add file read/write helper functions
@@ -298,7 +299,7 @@ int load_page(struct page_table_entry *pte, int pid, int vpn) {
 
 			mem[i] = (uint8_t)c;
 		}
-	} 
+	}
 
 	phys_pages[pte->ppn].pid = pid;
 	phys_pages[pte->ppn].valid = 1;
@@ -336,7 +337,7 @@ int load_page_table(int pid) {
 		return -1;
 	}
 
-	if(proc->page_table_exists) {
+	if(!proc->page_table_exists) {
 		DEBUG("attempting to load a page table that does not exist\n");
 		return -1;
 	}
@@ -347,6 +348,7 @@ int load_page_table(int pid) {
 	}
 
 	int ppn = reserve_ppn(pid);
+	// DEBUG("%d\n", phys_pages[ppn].pid);
 
 	if(ppn == -1) {
 		DEBUG("unable to reserve PPN when loading page table\n");
@@ -423,6 +425,7 @@ struct MM_MapResult MM_Map(int pid, uint32_t address, int writeable) {
 		return ret;
 	}
 
+	// TODO: Code passes almost all tests if this is commented out lol
 	if(!pte->present) {
 		int ppn = reserve_ppn(pid);
 
@@ -543,6 +546,11 @@ int MM_StoreByte(int pid, uint32_t address, uint8_t value) {
 	uint8_t offset = (uint8_t)(address & MM_PAGE_OFFSET_MASK);
 
 	struct process *const proc = &processes[pid];
+	// DEBUG("%d\n", phys_pages[0].is_page_table);
+	// for(int i = 0; i < MM_NUM_PTES; i++) {
+	// 	printf("%d ", proc->page_table[i].present);
+	// }
+	// printf("\n");
 
 	// TODO: Make sure all errors are in the past tense throughout this entire file
 	// TODO: Also try to standardize all errors
@@ -582,7 +590,7 @@ int MM_StoreByte(int pid, uint32_t address, uint8_t value) {
 		}
 
 		pte->ppn = ppn;
-		
+
 		// TODO: Error checking
 		if(load_page(pte, pid, vpn)) {
 			DEBUG("unable to load page to write data\n");
@@ -592,6 +600,12 @@ int MM_StoreByte(int pid, uint32_t address, uint8_t value) {
 
 	// TODO: A lot of this could probably go in a helper function
 	if(phys_pages[pte->ppn].pid != pid) {
+		// DEBUG("\n Phys: %d \n Call: %d \n VPN:  %d\n", phys_pages[pte->ppn].pid, pid, vpn);
+		// DEBUG("PID %d, VPN %d\n", pid, vpn);
+		// print_pte(pte);
+		// struct process *const tmp_proc = &processes[phys_pages[pte->ppn].pid];
+		// struct page_table_entry *tmp_pte = &tmp_proc->page_table[vpn];
+		// print_pte(tmp_pte);
 		DEBUG("phys page and load call PID's do not match when writing\n");
 		return -1;
 	}

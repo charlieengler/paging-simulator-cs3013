@@ -497,7 +497,7 @@ static std::vector<section_tests> section_tests = {
 						}
 					}
 					std::map<std::tuple<int, uint32_t>, uint8_t> writes;
-					const size_t limit = 100;
+					const size_t limit = 100000;
 					srand(1337);
 					for (size_t i = 0; i < limit; i++) {
 						int pid = rand() % MM_MAX_PROCESSES;
