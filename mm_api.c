@@ -153,6 +153,8 @@ int eject_phys_page(int reserving_pid) {
 
 		if(!phys_pages[i].is_page_table)
 			ppn_to_eject = i;
+
+		// TODO: There should be a backup if all physical pages are page tables
 	}
 
 	if(ppn_to_eject == -1) {
@@ -177,6 +179,9 @@ int eject_phys_page(int reserving_pid) {
 		pte_to_eject->accesses = 0;
 	}
 
+	// DEBUG("Ejecting PPN: %d\n", ppn_to_eject);
+	// dump_mem(ppn_to_eject);
+
 	if(is_dirty) {
 		FILE *swap_file = proc->swap_file;
 		fseek(swap_file, vpn_to_eject * MM_PAGE_SIZE_BYTES, SEEK_SET);
@@ -196,17 +201,11 @@ int eject_phys_page(int reserving_pid) {
 }
 
 int reserve_ppn(int reserving_pid) {
-	int ppn = -1;
-
-	for(int i = 0; i < MM_PHYSICAL_PAGES; i++) {
+	for(int i = 0; i < MM_PHYSICAL_PAGES; i++)
 		if(!phys_pages[i].valid)
 			return i;
 
-		if(!phys_pages[i].is_page_table && swap_enabled)
-			ppn = i;
-	}
-
-	if(!swap_enabled && ppn == -1) {
+	if(!swap_enabled) {
 		DEBUG("pages full and swap disabled\n");
 		return -1;
 	} else {
@@ -218,14 +217,14 @@ int create_page_table(int pid) {
 	struct process *const proc = &processes[pid];
 
 	if(proc == NULL) {
-		DEBUG("process is NULL in create_page_table\n");
+		DEBUG("process is NULL when creating page table\n");
 		return -1;
 	}
 
 	int ppn = reserve_ppn(pid);
 
 	if(ppn == -1) {
-		DEBUG("unable to reserve PPN in create_page_table\n");
+		DEBUG("unable to reserve PPN when creating page table\n");
 		return -1;
 	}
 
@@ -263,8 +262,8 @@ int load_page(struct page_table_entry *pte, int pid, int vpn) {
 		return -1;
 	}
 
-	if(phys_pages[pte->ppn].valid) {
-		DEBUG("attempted to load page into valid physical page\n");
+	if(phys_pages[pte->ppn].valid && !swap_enabled) {
+		DEBUG("attempted to load page into valid physical page with swap disabled\n");
 		return -1;
 	}
 
@@ -279,6 +278,11 @@ int load_page(struct page_table_entry *pte, int pid, int vpn) {
 	}
 
 	if(swap_enabled) {
+		if(phys_pages[pte->ppn].valid) {
+			DEBUG("attempted to load page into valid physical page with swap enabled\n");
+			return -1;
+		}
+
 		struct process *const proc = &processes[pid];
 	
 		// TODO: Maybe add file read/write helper functions
@@ -324,6 +328,54 @@ int check_mem_info(int pid, uint32_t address, char message[128]) {
 	return 0;
 }
 
+int load_page_table(int pid) {
+	struct process *const proc = &processes[pid];
+	
+	if(proc == NULL) {
+		DEBUG("process is NULL when loading page table\n");
+		return -1;
+	}
+
+	if(proc->page_table_exists) {
+		DEBUG("attempting to load a page table that does not exist\n");
+		return -1;
+	}
+
+	if(proc->page_table_resident) {
+		DEBUG("page table already resident in memory\n");
+		return 0;
+	}
+
+	int ppn = reserve_ppn(pid);
+
+	if(ppn == -1) {
+		DEBUG("unable to reserve PPN when loading page table\n");
+		return -1;
+	}
+
+	FILE *swap_file = proc->swap_file;
+	fseek(swap_file, MM_NUM_PTES * MM_PAGE_SIZE_BYTES, SEEK_SET);
+
+	uint8_t *mem = (uint8_t*)phys_mem_addr_for_phys_page_entry(&phys_pages[ppn]);
+	for(int i = 0; i < MM_PAGE_SIZE_BYTES; i++) {
+		int c = fgetc(swap_file);
+
+		if(c == EOF)
+			c = 0;
+
+		mem[i] = (uint8_t)c;
+	}
+
+	proc->page_table_resident = 1;
+
+	phys_pages[ppn].pid = pid;
+	phys_pages[ppn].vpn = -1;
+	phys_pages[ppn].valid = 1;
+	phys_pages[ppn].is_page_table = 1;
+
+	return 0;
+}
+
 struct MM_MapResult MM_Map(int pid, uint32_t address, int writeable) {	
 	CHECK(sizeof(struct page_table_entry) <= MM_MAX_PTE_SIZE_BYTES);
 
@@ -353,14 +405,14 @@ struct MM_MapResult MM_Map(int pid, uint32_t address, int writeable) {
 	}
 
 	// TODO: Implement load_page_table
-	// if(!proc->page_table_resident) {
-	// 	if(load_page_table()) {
-	// 		sprintf(message, "unable to load page table");
-	// 		ret.error = 1;
+	if(!proc->page_table_resident) {
+		if(load_page_table(pid)) {
+			sprintf(message, "unable to load page table");
+			ret.error = 1;
 
-	// 		return ret;
-	// 	}
-	// }
+			return ret;
+		}
+	}
 
 	struct page_table_entry *pte = &(proc->page_table[vpn]);
 
@@ -415,12 +467,12 @@ int MM_LoadByte(int pid, uint32_t address, uint8_t *value) {
 	}
 
 	// TODO: Implement load_page_table
-	// if(!proc->page_table_resident) {
-	// 	if(load_page_table()) {
-	// 		DEBUG("unable to load page table when attempting to read data\n");
-	// 		return -1;
-	// 	}
-	// }
+	if(!proc->page_table_resident) {
+		if(load_page_table(pid)) {
+			DEBUG("unable to load page table when attempting to read data\n");
+			return -1;
+		}
+	}
 
 	// Use vpn as index to find PTE for this page
 	struct page_table_entry *pte = &proc->page_table[vpn];
@@ -431,6 +483,16 @@ int MM_LoadByte(int pid, uint32_t address, uint8_t *value) {
 	}
 
 	if(!pte->present) {
+		int ppn = reserve_ppn(pid);
+
+		if(ppn == -1) {
+			DEBUG("unable to reserve PPN to read data\n");
+			
+			return -1;
+		}
+
+		pte->ppn = ppn;
+		
 		// TODO: Error checking
 		if(load_page(pte, pid, vpn)) {
 			DEBUG("unable to load page to read data\n");
@@ -465,6 +527,8 @@ int MM_LoadByte(int pid, uint32_t address, uint8_t *value) {
 	// Now we can get values from physical memory
 	*value = phys_mem[physical_address];
 
+	// DEBUG("Read:\n PID: %d\n VPN: %d\n PPN: %d\n Val: %x\n", pid, vpn, pte->ppn, *value);
+
 	// TODO: Check for the following errors (should be helper function):
 		// pid out of range, complain
 		// address out of range, complain
@@ -488,12 +552,12 @@ int MM_StoreByte(int pid, uint32_t address, uint8_t value) {
 	}
 
 	// TODO: Implement load_page_table
-	// if(!proc->page_table_resident) {
-	// 	if(load_page_table()) {
-	// 		DEBUG("unable to load page table when attempting to read data\n");
-	// 		return -1;
-	// 	}
-	// }
+	if(!proc->page_table_resident) {
+		if(load_page_table(pid)) {
+			DEBUG("unable to load page table when attempting to read data\n");
+			return -1;
+		}
+	}
 
 	// Use vpn as index to find PTE for this page
 	struct page_table_entry *pte = &proc->page_table[vpn];
@@ -509,6 +573,16 @@ int MM_StoreByte(int pid, uint32_t address, uint8_t value) {
 	}
 
 	if(!pte->present) {
+		int ppn = reserve_ppn(pid);
+
+		if(ppn == -1) {
+			DEBUG("unable to reserve PPN to write data\n");
+			
+			return -1;
+		}
+
+		pte->ppn = ppn;
+		
 		// TODO: Error checking
 		if(load_page(pte, pid, vpn)) {
 			DEBUG("unable to load page to write data\n");
@@ -541,6 +615,10 @@ int MM_StoreByte(int pid, uint32_t address, uint8_t value) {
 	uint32_t physical_address = ((uint32_t)pte->ppn << MM_PAGE_SIZE_BITS) | offset;
 
 	phys_mem[physical_address] = value;
+
+	pte->dirty = 1;
+
+	// DEBUG("Write:\n PID: %d\n VPN: %d\n PPN: %d\n Val: %x\n", pid, vpn, pte->ppn, value);
 
 	return 0;
 }
